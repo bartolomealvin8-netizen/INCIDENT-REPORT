@@ -2,9 +2,10 @@
 require_once __DIR__ . '/auth.php';
 require_login();
 
+$accounts = system_accounts();
 $username = (string) ($_SESSION['username'] ?? 'admin');
 $role = (string) ($_SESSION['role'] ?? 'admin');
-$studentIdentifier = (string) (SYSTEM_ACCOUNTS[$username]['login_identifier'] ?? $username);
+$studentIdentifier = (string) ($accounts[$username]['login_identifier'] ?? $username);
 $roleNames = [
     'admin' => 'Admin',
     'supervisor' => 'Supervisor',
@@ -52,6 +53,14 @@ if (isset($pageAccess[$page]) && !$pageAccess[$page]) {
 $pageTitle = $pageNames[$page];
 $notice = '';
 $error = '';
+$attendanceError = '';
+$attendanceData = ['current' => [], 'events' => []];
+try {
+    $attendanceData = guard_attendance();
+} catch (RuntimeException $exception) {
+    error_log($exception->getMessage());
+    $attendanceError = 'Shared attendance could not be loaded. Check the server data-storage configuration.';
+}
 
 if (!isset($_SESSION['system_csrf_token'])) {
     $_SESSION['system_csrf_token'] = bin2hex(random_bytes(32));
@@ -73,12 +82,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!is_string($token) || !is_string($action) || !hash_equals($_SESSION['system_csrf_token'], $token)) {
         $error = 'Your session could not be verified. Refresh the page and try again.';
     } elseif ($action === 'check_in' && $isGuard) {
-        $_SESSION['system_checked_in'] = true;
-        $_SESSION['system_check_in_time'] = date('g:i A');
-        $notice = 'Check-in recorded successfully.';
+        try {
+            $attendanceData = record_guard_attendance($username, $action);
+            $notice = 'Check-in recorded successfully.';
+        } catch (DomainException $exception) {
+            $error = $exception->getMessage();
+        } catch (RuntimeException $exception) {
+            error_log($exception->getMessage());
+            $error = 'Your check-in could not be saved. Please try again or contact an administrator.';
+        }
     } elseif ($action === 'check_out' && $isGuard) {
-        $_SESSION['system_checked_in'] = false;
-        $notice = 'Check-out recorded successfully.';
+        try {
+            $attendanceData = record_guard_attendance($username, $action);
+            $notice = 'Check-out recorded successfully.';
+        } catch (DomainException $exception) {
+            $error = $exception->getMessage();
+        } catch (RuntimeException $exception) {
+            error_log($exception->getMessage());
+            $error = 'Your check-out could not be saved. Please try again or contact an administrator.';
+        }
     } elseif ($action === 'record_violation' && $canRecordViolations) {
         $student = $_POST['student_name'] ?? '';
         $type = $_POST['violation_type'] ?? '';
@@ -133,6 +155,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $error = 'That report could not be found.';
         }
+    } elseif ($action === 'create_guard_account' && $isAdmin) {
+        $guardUsernameInput = $_POST['guard_username'] ?? '';
+        $guardNameInput = $_POST['guard_name'] ?? '';
+        $guardEmailInput = $_POST['guard_email'] ?? '';
+        $guardPasswordInput = $_POST['guard_password'] ?? '';
+        $guardUsername = is_string($guardUsernameInput) ? trim($guardUsernameInput) : '';
+        $guardName = is_string($guardNameInput) ? trim($guardNameInput) : '';
+        $guardEmail = is_string($guardEmailInput) ? strtolower(trim($guardEmailInput)) : '';
+        $guardPassword = is_string($guardPasswordInput) ? $guardPasswordInput : '';
+
+        if (
+            preg_match('/\A[a-zA-Z][a-zA-Z0-9._-]{2,31}\z/', $guardUsername) !== 1
+            || $guardName === ''
+            || strlen($guardName) > 100
+            || filter_var($guardEmail, FILTER_VALIDATE_EMAIL) === false
+            || strlen($guardEmail) > 254
+            || strlen($guardPassword) < 12
+            || strlen($guardPassword) > 72
+        ) {
+            $error = 'Enter a valid username, guard name, school email, and a password between 12 and 72 bytes.';
+        } else {
+            try {
+                $guardId = create_guard_account($guardUsername, $guardName, $guardEmail, $guardPassword);
+                $accounts = system_accounts();
+                $notice = "Guard account created successfully (ID: {$guardId}). Share the initial password with the guard securely.";
+            } catch (DomainException $exception) {
+                $error = $exception->getMessage();
+            } catch (RuntimeException $exception) {
+                error_log($exception->getMessage());
+                $error = 'The guard account could not be saved. Check the server account-storage configuration and try again.';
+            }
+        }
     } elseif ($action === 'save_settings' && $isAdmin) {
         $school = $_POST['school_name'] ?? '';
         $address = $_POST['school_address'] ?? '';
@@ -169,7 +223,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $violations = $_SESSION['system_violations'];
-$isCheckedIn = ($_SESSION['system_checked_in'] ?? false) === true;
+$guardAttendance = $attendanceData['current'][$username] ?? [];
+$isCheckedIn = ($guardAttendance['status'] ?? '') === 'on_duty';
 $csrf = htmlspecialchars((string) $_SESSION['system_csrf_token'], ENT_QUOTES, 'UTF-8');
 $safeUsername = htmlspecialchars($username, ENT_QUOTES, 'UTF-8');
 $initial = htmlspecialchars(strtoupper(substr($username, 0, 1)), ENT_QUOTES, 'UTF-8');
@@ -202,14 +257,24 @@ $guardSearch = is_string($guardSearch) ? trim($guardSearch) : '';
 $settingsTab = $_GET['tab'] ?? 'system';
 $settingsTab = is_string($settingsTab) && in_array($settingsTab, ['system', 'users', 'areas'], true) ? $settingsTab : 'system';
 $systemGuards = [];
-foreach (SYSTEM_ACCOUNTS as $systemName => $systemAccount) {
+foreach ($accounts as $systemName => $systemAccount) {
     if ($systemAccount['role'] === 'guard') {
-        $systemGuards[] = ['username' => $systemName, 'id' => 'G001', 'post' => 'Unassigned'];
+        $systemGuards[] = [
+            'username' => $systemName,
+            'name' => $systemAccount['display_name'] ?? ucfirst($systemName),
+            'id' => $systemAccount['guard_id'] ?? 'G001',
+            'post' => 'Unassigned',
+        ];
     }
 }
 $filteredGuards = array_values(array_filter($systemGuards, static function ($guard) use ($guardSearch): bool {
     return $guardSearch === '' || stripos(implode(' ', $guard), $guardSearch) !== false;
 }));
+$guardAttendanceEvents = array_values(array_filter(
+    $attendanceData['events'],
+    static fn ($event): bool => is_array($event) && ($event['username'] ?? '') === $username
+));
+$guardAttendanceEvents = array_slice(array_reverse($guardAttendanceEvents), 0, 10);
 $pendingCount = count(array_filter($violations, static function ($item): bool {
     return is_array($item) && ($item['status'] ?? '') === 'Pending';
 }));
@@ -459,6 +524,7 @@ $esc = static function ($value): string {
             </section>
             <?php if ($notice !== ''): ?><p class="notice" role="status"><?= $esc($notice) ?></p><?php endif; ?>
             <?php if ($error !== ''): ?><p class="error-message" role="alert"><?= $esc($error) ?></p><?php endif; ?>
+            <?php if ($attendanceError !== ''): ?><p class="error-message" role="alert"><?= $esc($attendanceError) ?></p><?php endif; ?>
 
             <?php if ($page === 'dashboard'): ?>
                 <?php if ($isStudent): ?>
@@ -520,7 +586,7 @@ $esc = static function ($value): string {
                     <div class="stats-grid">
                         <article class="stat-card"><div class="stat-topline"><span class="stat-label">Violation records</span><span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 2.8 19h18.4L12 3Z"/><path d="M12 9v4"/><path d="M12 16.5h.01"/></svg></span></div><p class="stat-value"><?= count($violations) ?></p><p class="stat-caption">Active records</p></article>
                         <article class="stat-card"><div class="stat-topline"><span class="stat-label">Pending reports</span><span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span></div><p class="stat-value"><?= $pendingCount ?></p><p class="stat-caption">Awaiting review</p></article>
-                        <?php if ($isGuard): ?><article class="stat-card"><div class="stat-topline"><span class="stat-label">My duty status</span><span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 20 6v5.5c0 5-3.2 8.4-8 10.5-4.8-2.1-8-5.5-8-10.5V6l8-3Z"/></svg></span></div><p class="stat-value" style="font-size:20px"><?= $isCheckedIn ? 'On duty' : 'Off duty' ?></p><p class="stat-caption">Current shift status</p></article><?php else: ?><article class="stat-card"><div class="stat-topline"><span class="stat-label">Accounts</span><span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M3 20v-1.5a6 6 0 0 1 12 0V20"/></svg></span></div><p class="stat-value"><?= count(SYSTEM_ACCOUNTS) ?></p><p class="stat-caption">Configured accounts</p></article><?php endif; ?>
+                        <?php if ($isGuard): ?><article class="stat-card"><div class="stat-topline"><span class="stat-label">My duty status</span><span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 20 6v5.5c0 5-3.2 8.4-8 10.5-4.8-2.1-8-5.5-8-10.5V6l8-3Z"/></svg></span></div><p class="stat-value" style="font-size:20px"><?= $isCheckedIn ? 'On duty' : 'Off duty' ?></p><p class="stat-caption">Current shift status</p></article><?php else: ?><article class="stat-card"><div class="stat-topline"><span class="stat-label">Accounts</span><span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M3 20v-1.5a6 6 0 0 1 12 0V20"/></svg></span></div><p class="stat-value"><?= count($accounts) ?></p><p class="stat-caption">Configured accounts</p></article><?php endif; ?>
                         <article class="stat-card"><div class="stat-topline"><span class="stat-label">Record storage</span><span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></span></div><p class="stat-value" style="font-size:20px">System</p><p class="stat-caption">Active records</p></article>
                     </div>
                     <div class="content-grid">
@@ -530,14 +596,112 @@ $esc = static function ($value): string {
                 <?php endif; ?>
 
             <?php elseif ($page === 'guards' && $canViewGuardMonitoring): ?>
-                <section class="panel"><div class="panel-header"><h2><?= $esc($pageTitle) ?></h2><span class="status-pill"><?= $isAdmin ? 'Read-only oversight' : 'Supervisor view' ?></span></div><form class="toolbar" method="get" action="Dashboard.php"><input type="hidden" name="page" value="guards"><input type="search" name="guard_q" value="<?= $esc($guardSearch) ?>" placeholder="Search guard name, ID, or post" aria-label="Search guard name, ID, or post"><button class="form-button">Search</button><button class="form-button secondary" type="button" disabled>+ Add Guard</button></form><div class="table-wrap"><table class="data-table"><thead><tr><th>ID</th><th>Name</th><th>Post / Area</th><th>Status</th><th>Check-in</th><th>Actions</th></tr></thead><tbody><?php foreach ($filteredGuards as $guard): ?><tr><td><?= $esc($guard['id']) ?></td><td><strong><?= $esc(ucfirst($guard['username'])) ?></strong></td><td><?= $esc($guard['post']) ?></td><td>Not shared</td><td>—</td><td><a class="table-link" href="Dashboard.php?page=guard-details&amp;guard=<?= rawurlencode($guard['username']) ?>">View</a></td></tr><?php endforeach; ?><?php if ($filteredGuards === []): ?><tr><td colspan="6">No matching guards.</td></tr><?php endif; ?></tbody></table></div><p class="subtle-copy"></p></section>
+                <section class="panel">
+                    <div class="panel-header">
+                        <h2><?= $esc($pageTitle) ?></h2>
+                        <span class="status-pill"><?= $isAdmin ? 'Admin oversight' : 'Supervisor view' ?></span>
+                    </div>
+                    <form class="toolbar" method="get" action="Dashboard.php">
+                        <input type="hidden" name="page" value="guards">
+                        <input type="search" name="guard_q" value="<?= $esc($guardSearch) ?>" placeholder="Search guard name, ID, or post" aria-label="Search guard name, ID, or post">
+                        <button class="form-button">Search</button>
+                        <?php if ($isAdmin): ?><a class="form-button" href="Dashboard.php?page=settings&amp;tab=users">+ Add Guard Account</a><?php endif; ?>
+                    </form>
+                    <div class="table-wrap">
+                        <table class="data-table">
+                            <thead><tr><th>ID</th><th>Name</th><th>Post / Area</th><th>Status</th><th>Check-in</th><th>Actions</th></tr></thead>
+                            <tbody>
+                                <?php foreach ($filteredGuards as $guard): ?>
+                                    <tr>
+                                        <td><?= $esc($guard['id']) ?></td>
+                                        <td><strong><?= $esc($guard['name']) ?></strong></td>
+                                        <td><?= $esc($guard['post']) ?></td>
+                                        <?php $currentGuardAttendance = $attendanceData['current'][$guard['username']] ?? []; ?>
+                                        <td><?= ($currentGuardAttendance['status'] ?? '') === 'on_duty' ? 'On duty' : (($currentGuardAttendance['status'] ?? '') === 'off_duty' ? 'Off duty' : 'No check-in yet') ?></td>
+                                        <td><?= $esc($currentGuardAttendance['checked_in_at'] ?? '—') ?></td>
+                                        <td><a class="table-link" href="Dashboard.php?page=guard-details&amp;guard=<?= rawurlencode($guard['username']) ?>">View</a></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                                <?php if ($filteredGuards === []): ?><tr><td colspan="6">No matching guards.</td></tr><?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
 
             <?php elseif ($page === 'guard-details' && $canViewGuardMonitoring): ?>
-                <?php $guardName = $_GET['guard'] ?? 'guard'; $guardName = is_string($guardName) && isset(SYSTEM_ACCOUNTS[$guardName]) && SYSTEM_ACCOUNTS[$guardName]['role'] === 'guard' ? $guardName : 'guard'; ?>
-                <section class="panel"><div class="panel-header"><h2>Guard Profile</h2><div><button class="form-button secondary" type="button" disabled>Edit</button> <a class="back-link" href="Dashboard.php?page=guards">← Back to guards</a></div></div><div class="detail-grid"><div class="detail-item"><span>Name</span><strong><?= $esc(ucfirst($guardName)) ?></strong></div><div class="detail-item"><span>Guard ID</span><strong>G001</strong></div><div class="detail-item"><span>Post / Area</span><strong>Unassigned</strong></div><div class="detail-item"><span>Status</span><strong>Not shared</strong></div><div class="detail-item"><span>Contact</span><strong>Not configured</strong></div><div class="detail-item"><span>Role</span><strong>Security Guard</strong></div></div><div class="panel-header"><h2>Duty Log / Attendance</h2><span class="status-pill">No shared records</span></div><div class="empty-state"><h3>No attendance records</h3><p>Attendance information will appear here once a guard checks in.</p></div></section>
+                <?php
+                $guardName = $_GET['guard'] ?? 'guard';
+                $guardName = is_string($guardName) && isset($accounts[$guardName]) && $accounts[$guardName]['role'] === 'guard' ? $guardName : 'guard';
+                $guardAccount = $accounts[$guardName];
+                $selectedGuardAttendance = $attendanceData['current'][$guardName] ?? [];
+                $selectedGuardEvents = array_values(array_filter(
+                    $attendanceData['events'],
+                    static fn ($event): bool => is_array($event) && ($event['username'] ?? '') === $guardName
+                ));
+                $selectedGuardEvents = array_slice(array_reverse($selectedGuardEvents), 0, 20);
+                ?>
+                <section class="panel">
+                    <div class="panel-header"><h2>Guard Profile</h2><div><a class="back-link" href="Dashboard.php?page=guards">← Back to guards</a></div></div>
+                    <div class="detail-grid">
+                        <div class="detail-item"><span>Name</span><strong><?= $esc($guardAccount['display_name'] ?? ucfirst($guardName)) ?></strong></div>
+                        <div class="detail-item"><span>Guard ID</span><strong><?= $esc($guardAccount['guard_id'] ?? 'G001') ?></strong></div>
+                        <div class="detail-item"><span>Post / Area</span><strong>Unassigned</strong></div>
+                        <div class="detail-item"><span>Status</span><strong><?= ($selectedGuardAttendance['status'] ?? '') === 'on_duty' ? 'On duty' : (($selectedGuardAttendance['status'] ?? '') === 'off_duty' ? 'Off duty' : 'No check-in yet') ?></strong></div>
+                        <div class="detail-item"><span>Last check-in</span><strong><?= $esc($selectedGuardAttendance['checked_in_at'] ?? '—') ?></strong></div>
+                        <div class="detail-item"><span>Last check-out</span><strong><?= $esc($selectedGuardAttendance['checked_out_at'] ?? '—') ?></strong></div>
+                        <div class="detail-item"><span>Contact</span><strong><?= $esc($guardAccount['login_identifier']) ?></strong></div>
+                        <div class="detail-item"><span>Role</span><strong>Security Guard</strong></div>
+                    </div>
+                    <div class="panel-header"><h2>Duty Log / Attendance</h2><span class="status-pill"><?= count($selectedGuardEvents) ?> recent event(s)</span></div>
+                    <?php if ($selectedGuardEvents === []): ?>
+                        <div class="empty-state"><h3>No attendance records</h3><p>Check-in and check-out events will appear here.</p></div>
+                    <?php else: ?>
+                        <div class="table-wrap">
+                            <table class="data-table">
+                                <thead><tr><th>Action</th><th>Date and time</th></tr></thead>
+                                <tbody>
+                                    <?php foreach ($selectedGuardEvents as $event): ?>
+                                        <tr>
+                                            <td><?= ($event['action'] ?? '') === 'check_in' ? 'Checked in' : 'Checked out' ?></td>
+                                            <td><?= $esc($event['occurred_at'] ?? '') ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
+                </section>
 
             <?php elseif ($page === 'my-shift' && $isGuard): ?>
-                <section class="panel"><div class="panel-header"><h2>My Duty Log</h2><span class="status-pill"><?= $isCheckedIn ? 'On Duty' : 'Off Duty' ?></span></div><div class="monitoring-content"><div class="monitoring-status"><span class="status-dot" aria-hidden="true"></span><?= $isCheckedIn ? 'Checked in at ' . $esc($_SESSION['system_check_in_time'] ?? '') : 'You have not checked in for a shift yet.' ?></div><p>This attendance record reflects the current duty status.</p></div><form class="system-form" method="post" action="Dashboard.php?page=my-shift"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><button class="form-button<?= $isCheckedIn ? ' secondary' : '' ?>" name="action" value="<?= $isCheckedIn ? 'check_out' : 'check_in' ?>"><?= $isCheckedIn ? 'End shift' : 'Check in for shift' ?></button></form></section>
+                <section class="panel">
+                    <div class="panel-header"><h2>My Duty Log</h2><span class="status-pill"><?= $isCheckedIn ? 'On Duty' : 'Off Duty' ?></span></div>
+                    <div class="monitoring-content">
+                        <div class="monitoring-status"><span class="status-dot" aria-hidden="true"></span><?= $isCheckedIn ? 'Checked in at ' . $esc($guardAttendance['checked_in_at'] ?? '') : 'You have not checked in for a shift yet.' ?></div>
+                        <p>This attendance status is shared with supervisors.</p>
+                    </div>
+                    <form class="system-form" method="post" action="Dashboard.php?page=my-shift">
+                        <input type="hidden" name="csrf_token" value="<?= $csrf ?>">
+                        <button class="form-button<?= $isCheckedIn ? ' secondary' : '' ?>" name="action" value="<?= $isCheckedIn ? 'check_out' : 'check_in' ?>"><?= $isCheckedIn ? 'End shift' : 'Check in for shift' ?></button>
+                    </form>
+                    <div class="panel-header"><h2>Recent attendance</h2><span class="status-pill"><?= count($guardAttendanceEvents) ?> recent event(s)</span></div>
+                    <?php if ($guardAttendanceEvents === []): ?>
+                        <div class="empty-state"><h3>No attendance events yet</h3><p>Your check-in and check-out history will appear here.</p></div>
+                    <?php else: ?>
+                        <div class="table-wrap">
+                            <table class="data-table">
+                                <thead><tr><th>Action</th><th>Date and time</th></tr></thead>
+                                <tbody>
+                                    <?php foreach ($guardAttendanceEvents as $event): ?>
+                                        <tr>
+                                            <td><?= ($event['action'] ?? '') === 'check_in' ? 'Checked in' : 'Checked out' ?></td>
+                                            <td><?= $esc($event['occurred_at'] ?? '') ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
+                </section>
 
             <?php elseif ($page === 'violation-form' && $canRecordViolations): ?>
                 <section class="panel"><div class="panel-header"><h2><?= $isStudent ? 'Report an Incident' : 'Report a Violation' ?></h2></div><form class="system-form" method="post" action="Dashboard.php?page=violation-form"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><div><label for="occurrence-at">Date &amp; Time</label><input id="occurrence-at" name="occurrence_at" type="datetime-local" required></div><?php if ($isStudent): ?><div><label for="student-name">Student name or ID</label><input id="student-name" name="student_name" maxlength="100" required placeholder="Enter your name or student ID"></div><div><label for="violation-type">Incident type</label><select id="violation-type" name="violation_type" required><option value="">Select incident type</option><option>Bullying</option><option>Theft</option><option>Harassment</option><option>Safety concern</option><option>Other</option></select></div><div><label for="location">Location</label><input id="location" name="location" maxlength="120" required placeholder="Where did this happen?"></div><div><label for="violation-details">Description</label><textarea id="violation-details" name="violation_details" maxlength="1000" required placeholder="Describe what happened and any details you want to share"></textarea></div><div><label for="person-involved">Person(s) involved (optional)</label><input id="person-involved" name="person_involved" maxlength="100" placeholder="Add a name or description if relevant"></div><div><label><input type="checkbox" name="submit_anonymously" value="1"> Submit anonymously</label></div><?php else: ?><div><label for="student-name">Student Name or ID</label><input id="student-name" name="student_name" maxlength="100" required placeholder="Enter student name or ID"></div><div><label for="violation-type">Type of Violation</label><select id="violation-type" name="violation_type" required><option value="">Select violation type</option><option>Late</option><option>Uniform</option><option>Fighting</option><option>Vandalism</option><option>Truancy</option><option>Other</option></select></div><div><label for="location">Location</label><input id="location" name="location" maxlength="120" required placeholder="Select or enter location"></div><div><label for="violation-details">Description</label><textarea id="violation-details" name="violation_details" maxlength="1000" required placeholder="Enter details of the incident"></textarea></div><?php endif; ?><button class="form-button" name="action" value="record_violation"><?= $isStudent ? 'Submit Incident' : 'Submit Report' ?></button></form></section>
@@ -562,7 +726,52 @@ $esc = static function ($value): string {
                 <section class="panel"><div class="panel-header"><h2>Reports</h2></div><nav class="report-tabs" aria-label="Report type"><a class="report-tab<?= $reportTab === 'violations' ? ' active' : '' ?>" href="Dashboard.php?page=reports&amp;report=violations">Violation Report</a><?php if (!$isStaff): ?><a class="report-tab<?= $reportTab === 'attendance' ? ' active' : '' ?>" href="Dashboard.php?page=reports&amp;report=attendance">Guard Attendance</a><?php endif; ?><a class="report-tab<?= $reportTab === 'summary' ? ' active' : '' ?>" href="Dashboard.php?page=reports&amp;report=summary">Summary Report</a></nav><form class="toolbar" method="post" action="Dashboard.php?page=reports"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><select name="report_type" aria-label="Report type"><option value="violations">Violation Report</option><?php if (!$isStaff): ?><option value="attendance">Guard Attendance</option><?php endif; ?><option value="summary">Summary Report</option></select><input type="date" aria-label="Start date"><select aria-label="Violation type"><option>All types</option><option>Late</option><option>Uniform</option><option>Fighting</option><option>Vandalism</option><option>Truancy</option></select><button class="form-button" name="action" value="generate_report">Generate Report</button></form><div class="content-grid" style="padding:20px"><section class="panel"><div class="panel-header"><h2>Report Data</h2></div><div class="monitoring-content"><div class="monitoring-status"><span class="status-dot" aria-hidden="true"></span><?= count($violations) ?> violation record(s) in the system</div></div></section><section class="panel"><div class="panel-header"><h2>Report Preview</h2></div><div class="empty-state"><h3><?= $generatedReport ? $esc(ucfirst($generatedReport['type']) . ' report generated') : 'Generate a report' ?></h3><p><?= $generatedReport ? (int) $generatedReport['count'] . ' record(s) in the system, generated ' . $esc($generatedReport['generated_at']) . '.' : 'Choose a report type to preview the summary.' ?></p></div></section></div></section>
 
             <?php elseif ($page === 'settings' && $isAdmin): ?>
-                <section class="panel"><div class="panel-header"><h2>Settings</h2><span class="status-pill">System</span></div><nav class="report-tabs" aria-label="Settings categories"><a class="report-tab<?= $settingsTab === 'system' ? ' active' : '' ?>" href="Dashboard.php?page=settings&amp;tab=system">System</a><a class="report-tab<?= $settingsTab === 'users' ? ' active' : '' ?>" href="Dashboard.php?page=settings&amp;tab=users">Users</a><a class="report-tab<?= $settingsTab === 'areas' ? ' active' : '' ?>" href="Dashboard.php?page=settings&amp;tab=areas">Posts / Areas</a></nav><?php if ($settingsTab === 'system'): ?><form class="system-form" method="post" action="Dashboard.php?page=settings&amp;tab=system"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><div><label for="school-name">School Name</label><input id="school-name" name="school_name" maxlength="120" value="<?= $esc($_SESSION['system_settings']['school_name']) ?>" required></div><div><label for="school-address">School Address</label><input id="school-address" name="school_address" maxlength="200" value="<?= $esc($_SESSION['system_settings']['school_address']) ?>" required></div><div><label for="academic-year">Academic Year</label><input id="academic-year" name="academic_year" maxlength="30" value="<?= $esc($_SESSION['system_settings']['academic_year']) ?>" required></div><button class="form-button" name="action" value="save_settings">Save Settings</button></form><?php elseif ($settingsTab === 'users'): ?><div class="table-wrap"><table class="data-table"><thead><tr><th>Username</th><th>Role</th><th>Access</th><th>Actions</th></tr></thead><tbody><?php foreach (SYSTEM_ACCOUNTS as $systemName => $systemAccount): ?><tr><td><strong><?= $esc($systemName) ?></strong></td><td><?= $esc(ucfirst($systemAccount['role'])) ?></td><td>Configured</td><td><button class="form-button secondary" type="button" disabled>Edit</button></td></tr><?php endforeach; ?></tbody></table></div><?php else: ?><div class="table-wrap"><table class="data-table"><thead><tr><th>Post / Area</th><th>Description</th><th>Status</th></tr></thead><tbody><tr><td><strong>Main Gate</strong></td><td>Primary entrance</td><td>Active</td></tr><tr><td><strong>Building A</strong></td><td>Academic building</td><td>Monitoring</td></tr><tr><td><strong>School Ground</strong></td><td>Outdoor area</td><td>Active</td></tr></tbody></table></div><p class="subtle-copy"></p><?php endif; ?></section>
+                <section class="panel">
+                    <div class="panel-header"><h2>Settings</h2><span class="status-pill">System</span></div>
+                    <nav class="report-tabs" aria-label="Settings categories">
+                        <a class="report-tab<?= $settingsTab === 'system' ? ' active' : '' ?>" href="Dashboard.php?page=settings&amp;tab=system">System</a>
+                        <a class="report-tab<?= $settingsTab === 'users' ? ' active' : '' ?>" href="Dashboard.php?page=settings&amp;tab=users">Users</a>
+                        <a class="report-tab<?= $settingsTab === 'areas' ? ' active' : '' ?>" href="Dashboard.php?page=settings&amp;tab=areas">Posts / Areas</a>
+                    </nav>
+                    <?php if ($settingsTab === 'system'): ?>
+                        <form class="system-form" method="post" action="Dashboard.php?page=settings&amp;tab=system">
+                            <input type="hidden" name="csrf_token" value="<?= $csrf ?>">
+                            <div><label for="school-name">School Name</label><input id="school-name" name="school_name" maxlength="120" value="<?= $esc($_SESSION['system_settings']['school_name']) ?>" required></div>
+                            <div><label for="school-address">School Address</label><input id="school-address" name="school_address" maxlength="200" value="<?= $esc($_SESSION['system_settings']['school_address']) ?>" required></div>
+                            <div><label for="academic-year">Academic Year</label><input id="academic-year" name="academic_year" maxlength="30" value="<?= $esc($_SESSION['system_settings']['academic_year']) ?>" required></div>
+                            <button class="form-button" name="action" value="save_settings">Save Settings</button>
+                        </form>
+                    <?php elseif ($settingsTab === 'users'): ?>
+                        <div class="panel-header"><h3>Add a guard account</h3></div>
+                        <p class="subtle-copy" style="padding:0 20px">Create the guard's sign-in account after hiring. Give the initial password to the guard securely. Supervisors can view guard accounts but cannot create them.</p>
+                        <form class="system-form" method="post" action="Dashboard.php?page=settings&amp;tab=users">
+                            <input type="hidden" name="csrf_token" value="<?= $csrf ?>">
+                            <div><label for="guard-name">Guard's full name</label><input id="guard-name" name="guard_name" maxlength="100" autocomplete="name" required></div>
+                            <div><label for="guard-username">Username</label><input id="guard-username" name="guard_username" minlength="3" maxlength="32" pattern="[A-Za-z][A-Za-z0-9._-]*" autocomplete="username" required></div>
+                            <div><label for="guard-email">School email</label><input id="guard-email" name="guard_email" type="email" maxlength="254" autocomplete="email" required></div>
+                            <div><label for="guard-password">Initial password</label><input id="guard-password" name="guard_password" type="password" minlength="12" maxlength="72" autocomplete="new-password" required><small>Use 12-72 bytes (ASCII recommended). Passwords are stored as hashes.</small></div>
+                            <button class="form-button" name="action" value="create_guard_account">Create Guard Account</button>
+                        </form>
+                        <div class="table-wrap">
+                            <table class="data-table">
+                                <thead><tr><th>Name</th><th>Username</th><th>Login email / ID</th><th>Role</th><th>Guard ID</th></tr></thead>
+                                <tbody>
+                                    <?php foreach ($accounts as $systemName => $systemAccount): ?>
+                                        <tr>
+                                            <td><strong><?= $esc($systemAccount['display_name'] ?? ucfirst($systemName)) ?></strong></td>
+                                            <td><?= $esc($systemName) ?></td>
+                                            <td><?= $esc($systemAccount['login_identifier']) ?></td>
+                                            <td><?= $esc(ucfirst($systemAccount['role'])) ?></td>
+                                            <td><?= $systemAccount['role'] === 'guard' ? $esc($systemAccount['guard_id'] ?? 'G001') : '—' ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php else: ?>
+                        <div class="table-wrap"><table class="data-table"><thead><tr><th>Post / Area</th><th>Description</th><th>Status</th></tr></thead><tbody><tr><td><strong>Main Gate</strong></td><td>Primary entrance</td><td>Active</td></tr><tr><td><strong>Building A</strong></td><td>Academic building</td><td>Monitoring</td></tr><tr><td><strong>School Ground</strong></td><td>Outdoor area</td><td>Active</td></tr></tbody></table></div>
+                    <?php endif; ?>
+                </section>
 
             <?php else: ?>
                 <section class="panel"><div class="empty-state"><h3>Page not found</h3><p>You may not have permission to view this page.</p></div></section>
