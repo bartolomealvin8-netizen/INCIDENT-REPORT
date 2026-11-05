@@ -37,6 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#eef2ed">
     <title>Sign in | Incident System</title>
+    <link rel="preload" as="image" href="olfu%20logo%20transparent.png">
     <style>
         :root {
             color-scheme: light;
@@ -618,7 +619,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <main class="login-card">
         <section class="credentials-panel" aria-labelledby="login-title">
             <div class="credentials-mark" aria-hidden="true">
-                <img src="olfu%20logo%20transparent.png" alt="">
+                <img src="olfu%20logo%20transparent.png" alt="" fetchpriority="high">
             </div>
             <p class="eyebrow">Welcome back</p>
             <h2 id="login-title">Sign in</h2>

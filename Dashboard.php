@@ -220,6 +220,7 @@ if ($isAdmin) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#eef2ed">
     <title><?= $escape($pageTitle) ?> | Incident System</title>
+    <link rel="preload" as="image" href="olfu%20logo%202.jpg">
     <style>
         :root{color-scheme:light;font-family:Inter,"Segoe UI",Arial,sans-serif;color:#26372f;background:#eef2ed;font-synthesis:none;text-rendering:optimizeLegibility}
         *{box-sizing:border-box}
@@ -290,7 +291,7 @@ if ($isAdmin) {
 <div class="app-shell">
     <aside class="sidebar" aria-label="Main navigation">
         <a class="brand" href="Dashboard.php?page=dashboard" aria-label="Incident System dashboard">
-            <span class="brand-mark" aria-hidden="true"><img src="olfu%20logo%202.jpg" alt=""></span>
+            <span class="brand-mark" aria-hidden="true"><img src="olfu%20logo%202.jpg" alt="" fetchpriority="high"></span>
             <span class="brand-name">Incident<br>System</span>
         </a>
         <p class="nav-label"><?= $isAdmin ? 'Administration' : 'Guidance' ?></p>
