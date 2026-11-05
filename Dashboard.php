@@ -290,7 +290,7 @@ if ($isAdmin) {
 <div class="app-shell">
     <aside class="sidebar" aria-label="Main navigation">
         <a class="brand" href="Dashboard.php?page=dashboard" aria-label="Incident System dashboard">
-            <span class="brand-mark" aria-hidden="true"><img src="olfu-logo-sidebar.png" alt=""></span>
+            <span class="brand-mark" aria-hidden="true"><img src="olfu%20logo%202.jpg" alt=""></span>
             <span class="brand-name">Incident<br>System</span>
         </a>
         <p class="nav-label"><?= $isAdmin ? 'Administration' : 'Guidance' ?></p>
@@ -354,7 +354,6 @@ if ($isAdmin) {
             <?php elseif ($page === 'violation-form'): ?>
                 <section class="panel">
                     <div class="panel-header"><h2>Submit incident to Guidance</h2><span class="status-pill">Shared form</span></div>
-                    <p class="detail-copy">Use the same form regardless of whether you are an administrator or Guidance staff. Include what happened and avoid assumptions.</p>
                     <form class="system-form" method="post" action="Dashboard.php?page=violation-form">
                         <input type="hidden" name="csrf_token" value="<?= $csrf ?>">
                         <div><label for="occurrence-at">Date and time of incident</label><input id="occurrence-at" name="occurrence_at" type="datetime-local" required></div>
