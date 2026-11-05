@@ -535,57 +535,74 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         body {
-            display: block;
-            padding: 0;
-            background: #eef2ed;
+            display: grid;
+            min-height: 100vh;
+            place-items: center;
+            padding: 32px 20px;
+            background:
+                radial-gradient(ellipse at 18% 12%, rgba(255, 255, 255, 0.1), transparent 36%),
+                linear-gradient(145deg, #175b40 0%, #124d37 100%);
         }
 
         .login-card {
-            width: 100%;
-            min-height: 100vh;
-            border: 0;
-            border-radius: 0;
-            box-shadow: none;
+            display: block;
+            width: min(700px, 100%);
+            min-height: 0;
+            border: 1px solid #d5ded5;
+            border-radius: 14px;
+            box-shadow: 0 20px 52px rgba(8, 39, 27, 0.24);
         }
 
-        .brand-panel,
         .credentials-panel {
-            padding: clamp(40px, 7vw, 110px);
+            min-height: 0;
+            padding: clamp(36px, 6vw, 64px);
+            border: 0;
         }
 
-        .brand-content {
+        .credentials-panel form {
             width: min(100%, 520px);
         }
 
-        .credentials-panel form,
-        .credentials-panel .system-note,
-        .credentials-panel .security-note {
-            width: min(100%, 480px);
+        .credentials-mark {
+            width: 88px;
+            height: 88px;
+            margin-bottom: 20px;
+        }
+
+        .credentials-panel h2 {
+            font-size: 35px;
+        }
+
+        .intro {
+            margin-bottom: 32px;
+            font-size: 15px;
+        }
+
+        .form-field {
+            margin-bottom: 20px;
+        }
+
+        input {
+            height: 52px;
+            font-size: 15px;
+        }
+
+        .submit-button {
+            min-height: 50px;
+            font-size: 15px;
         }
 
         @media (max-width: 700px) {
             body {
-                padding: 0;
+                padding: 20px 16px;
             }
 
             .login-card {
-                min-height: 100vh;
-            }
-
-            .brand-panel {
-                min-height: 32vh;
-                padding: 36px clamp(24px, 7vw, 52px);
-            }
-
-            .brand-mark {
-                margin-bottom: 18px;
+                width: min(100%, 600px);
             }
 
             .credentials-panel {
-                min-height: 68vh;
-                justify-content: flex-start;
-                padding: 36px clamp(24px, 7vw, 52px) 48px;
-                border-top: 1px solid #e1e7e1;
+                padding: 40px clamp(24px, 7vw, 52px);
             }
         }
 
@@ -599,12 +616,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </head>
 <body>
     <main class="login-card">
-        <section class="brand-panel" aria-labelledby="brand-title">
-            <div class="brand-content">
-                <h1 id="brand-title">Incident System</h1>
-            </div>
-        </section>
-
         <section class="credentials-panel" aria-labelledby="login-title">
             <div class="credentials-mark" aria-hidden="true">
                 <img src="olfu%20logo%20transparent.png" alt="">
