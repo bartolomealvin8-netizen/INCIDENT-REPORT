@@ -4,10 +4,7 @@ declare(strict_types=1);
 // System account definitions for authentication and role access.
 const SYSTEM_ACCOUNTS = [
     'admin' => ['login_identifier' => 'admin@school.example', 'password_hash' => '$2y$10$.69Gmlz/a0.9aj.0a2s/aeSPqDDyiyZ20p4DMM5ed9E8gIE/5Cr0a', 'role' => 'admin'],
-    'supervisor' => ['login_identifier' => 'supervisor@school.example', 'password_hash' => '$2y$10$QyTXckR0epyJ8aUdJUkLn.XHms0zly0vQT3xOv4fde09SeE2eS7QO', 'role' => 'supervisor'],
-    'guard' => ['login_identifier' => 'guard@school.example', 'password_hash' => '$2y$10$cEwDWEI5yu1pvWn33rHZGu24IulTcP45RNkh0IEAcQNi9.35M.AhS', 'role' => 'guard'],
     'staff' => ['login_identifier' => 'staff@school.example', 'password_hash' => '$2y$10$Cwpn1X5FxbXSnnHDP3py.Ov5O1xJI9DGpfe4fO.pdITWU2Ljx5.1C', 'role' => 'staff'],
-    'student' => ['login_identifier' => '0319-3904-479', 'password_hash' => '$2y$10$cRZzLS23bQ/u4T85Ty2i9OMzodAu0APbz8FPgiQglDAQQfldwfgvy', 'role' => 'student'],
 ];
 
 function account_store_path(): string
@@ -55,16 +52,18 @@ function read_stored_accounts($stream, bool $alreadyLocked = false): array
                 || preg_match('/\A[a-zA-Z][a-zA-Z0-9._-]{2,31}\z/', $username) !== 1
                 || !is_array($account)
                 || ($account['username'] ?? null) !== $username
-                || !isset($account['display_name'], $account['login_identifier'], $account['password_hash'], $account['role'], $account['guard_id'])
+                || !isset($account['display_name'], $account['login_identifier'], $account['password_hash'], $account['role'])
                 || !is_string($account['display_name'])
                 || $account['display_name'] === ''
                 || strlen($account['display_name']) > 100
                 || !is_string($account['login_identifier'])
                 || filter_var($account['login_identifier'], FILTER_VALIDATE_EMAIL) === false
                 || !is_string($account['password_hash'])
-                || ($account['role'] ?? null) !== 'guard'
-                || !is_string($account['guard_id'])
-                || preg_match('/\AG\d{3,}\z/', $account['guard_id']) !== 1
+                || !in_array($account['role'] ?? null, ['staff', 'guard'], true)
+                || (($account['role'] ?? null) === 'guard' && (
+                    !is_string($account['guard_id'] ?? null)
+                    || preg_match('/\AG\d{3,}\z/', $account['guard_id']) !== 1
+                ))
             ) {
                 throw new RuntimeException('The account store contains an invalid account record.');
             }
@@ -96,10 +95,13 @@ function system_accounts(): array
         fclose($stream);
     }
 
-    return SYSTEM_ACCOUNTS + $storedAccounts;
+    return SYSTEM_ACCOUNTS + array_filter(
+        $storedAccounts,
+        static fn (array $account): bool => ($account['role'] ?? '') === 'staff'
+    );
 }
 
-function create_guard_account(string $username, string $displayName, string $email, string $password): string
+function create_staff_account(string $username, string $displayName, string $email, string $password): void
 {
     if (
         preg_match('/\A[a-zA-Z][a-zA-Z0-9._-]{2,31}\z/', $username) !== 1
@@ -110,7 +112,7 @@ function create_guard_account(string $username, string $displayName, string $ema
         || strlen($password) < 12
         || strlen($password) > 72
     ) {
-        throw new InvalidArgumentException('Guard account details are invalid.');
+        throw new InvalidArgumentException('Staff account details are invalid.');
     }
 
     $path = account_store_path();
@@ -159,20 +161,9 @@ function create_guard_account(string $username, string $displayName, string $ema
             }
         }
 
-        $nextGuardNumber = 1;
-        foreach ($accounts as $account) {
-            if (($account['role'] ?? '') !== 'guard') {
-                continue;
-            }
-            $guardId = $account['guard_id'] ?? 'G001';
-            if (is_string($guardId) && preg_match('/\AG(\d+)\z/', $guardId, $matches) === 1) {
-                $nextGuardNumber = max($nextGuardNumber, (int) $matches[1] + 1);
-            }
-        }
-
         $passwordHash = password_hash($password, PASSWORD_DEFAULT);
         if ($passwordHash === false) {
-            throw new RuntimeException('Could not hash the new guard account password.');
+            throw new RuntimeException('Could not hash the new staff account password.');
         }
 
         $storedAccounts[$username] = [
@@ -180,8 +171,7 @@ function create_guard_account(string $username, string $displayName, string $ema
             'display_name' => $displayName,
             'login_identifier' => $email,
             'password_hash' => $passwordHash,
-            'role' => 'guard',
-            'guard_id' => 'G' . str_pad((string) $nextGuardNumber, 3, '0', STR_PAD_LEFT),
+            'role' => 'staff',
         ];
 
         try {
@@ -192,109 +182,22 @@ function create_guard_account(string $username, string $displayName, string $ema
 
         rewind($stream);
         if (!ftruncate($stream, 0) || fwrite($stream, $contents) !== strlen($contents) || !fflush($stream)) {
-            throw new RuntimeException('Could not save the new guard account.');
+            throw new RuntimeException('Could not save the new staff account.');
         }
-        return $storedAccounts[$username]['guard_id'];
     } finally {
         flock($stream, LOCK_UN);
         fclose($stream);
     }
 }
 
-function read_guard_attendance_store($stream, bool $alreadyLocked = false): array
+function incident_store_path(): string
 {
-    if (!$alreadyLocked && !flock($stream, LOCK_SH)) {
-        throw new RuntimeException('Could not lock the attendance store for reading.');
-    }
-
-    try {
-        $contents = stream_get_contents($stream);
-        if ($contents === false) {
-            throw new RuntimeException('Could not read the attendance store.');
-        }
-        if (trim($contents) === '') {
-            return ['current' => [], 'events' => []];
-        }
-
-        try {
-            $attendance = json_decode($contents, true, 512, JSON_THROW_ON_ERROR);
-        } catch (JsonException $exception) {
-            throw new RuntimeException('The attendance store contains invalid JSON.', 0, $exception);
-        }
-
-        if (
-            !is_array($attendance)
-            || !isset($attendance['current'], $attendance['events'])
-            || !is_array($attendance['current'])
-            || !is_array($attendance['events'])
-        ) {
-            throw new RuntimeException('The attendance store has an invalid format.');
-        }
-
-        foreach ($attendance['current'] as $username => $record) {
-            if (
-                !is_string($username)
-                || !is_array($record)
-                || !in_array($record['status'] ?? null, ['on_duty', 'off_duty'], true)
-                || !array_key_exists('checked_in_at', $record)
-                || !array_key_exists('checked_out_at', $record)
-                || ($record['checked_in_at'] !== null && !is_string($record['checked_in_at']))
-                || ($record['checked_out_at'] !== null && !is_string($record['checked_out_at']))
-            ) {
-                throw new RuntimeException('The attendance store contains an invalid status record.');
-            }
-        }
-        foreach ($attendance['events'] as $event) {
-            if (
-                !is_array($event)
-                || !isset($event['username'], $event['action'], $event['occurred_at'])
-                || !is_string($event['username'])
-                || !in_array($event['action'], ['check_in', 'check_out'], true)
-                || !is_string($event['occurred_at'])
-            ) {
-                throw new RuntimeException('The attendance store contains an invalid event.');
-            }
-        }
-
-        return $attendance;
-    } finally {
-        if (!$alreadyLocked) {
-            flock($stream, LOCK_UN);
-        }
-    }
+    return dirname(account_store_path()) . DIRECTORY_SEPARATOR . 'incidents.json';
 }
 
-function guard_attendance(): array
+function open_private_store(string $path)
 {
-    $path = dirname(account_store_path()) . DIRECTORY_SEPARATOR . 'attendance.json';
-    if (!is_file($path)) {
-        return ['current' => [], 'events' => []];
-    }
-
-    $stream = fopen($path, 'rb');
-    if ($stream === false) {
-        throw new RuntimeException('Could not open the attendance store.');
-    }
-
-    try {
-        return read_guard_attendance_store($stream);
-    } finally {
-        fclose($stream);
-    }
-}
-
-function record_guard_attendance(string $username, string $action): array
-{
-    if (!in_array($action, ['check_in', 'check_out'], true)) {
-        throw new InvalidArgumentException('Attendance action is invalid.');
-    }
-
-    $account = system_accounts()[$username] ?? null;
-    if (!is_array($account) || ($account['role'] ?? '') !== 'guard') {
-        throw new DomainException('Only guard accounts can record guard attendance.');
-    }
-
-    $directory = dirname(account_store_path());
+    $directory = dirname($path);
     if (!is_dir($directory)) {
         $previousUmask = umask(0077);
         try {
@@ -303,11 +206,10 @@ function record_guard_attendance(string $username, string $action): array
             umask($previousUmask);
         }
         if (!$directoryCreated && !is_dir($directory)) {
-            throw new RuntimeException('Could not create the attendance data directory.');
+            throw new RuntimeException('Could not create the application data directory.');
         }
     }
 
-    $path = $directory . DIRECTORY_SEPARATOR . 'attendance.json';
     $previousUmask = umask(0077);
     try {
         $stream = fopen($path, 'c+');
@@ -315,59 +217,149 @@ function record_guard_attendance(string $username, string $action): array
         umask($previousUmask);
     }
     if ($stream === false) {
-        throw new RuntimeException('Could not open the attendance store for writing.');
+        throw new RuntimeException('Could not open the application data store.');
     }
     if (!chmod($path, 0600)) {
         fclose($stream);
-        throw new RuntimeException('Could not restrict permissions on the attendance store.');
+        throw new RuntimeException('Could not restrict permissions on the application data store.');
     }
-    if (!flock($stream, LOCK_EX)) {
-        fclose($stream);
-        throw new RuntimeException('Could not lock the attendance store for writing.');
+
+    return $stream;
+}
+
+function read_incidents_store($stream, bool $alreadyLocked = false): array
+{
+    if (!$alreadyLocked && !flock($stream, LOCK_SH)) {
+        throw new RuntimeException('Could not lock the incident store for reading.');
     }
 
     try {
         rewind($stream);
-        $attendance = read_guard_attendance_store($stream, true);
-        $currentStatus = $attendance['current'][$username]['status'] ?? 'off_duty';
-        if ($action === 'check_in' && $currentStatus === 'on_duty') {
-            throw new DomainException('You are already checked in.');
+        $contents = stream_get_contents($stream);
+        if ($contents === false) {
+            throw new RuntimeException('Could not read the incident store.');
         }
-        if ($action === 'check_out' && $currentStatus !== 'on_duty') {
-            throw new DomainException('You are not currently checked in.');
+        if (trim($contents) === '') {
+            return [];
         }
-
-        $timestamp = date(DATE_ATOM);
-        $attendance['current'][$username] ??= [
-            'status' => 'off_duty',
-            'checked_in_at' => null,
-            'checked_out_at' => null,
-        ];
-        if ($action === 'check_in') {
-            $attendance['current'][$username]['status'] = 'on_duty';
-            $attendance['current'][$username]['checked_in_at'] = $timestamp;
-        } else {
-            $attendance['current'][$username]['status'] = 'off_duty';
-            $attendance['current'][$username]['checked_out_at'] = $timestamp;
-        }
-        $attendance['events'][] = [
-            'username' => $username,
-            'action' => $action,
-            'occurred_at' => $timestamp,
-        ];
 
         try {
-            $contents = json_encode($attendance, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+            $incidents = json_decode($contents, true, 512, JSON_THROW_ON_ERROR);
         } catch (JsonException $exception) {
-            throw new RuntimeException('Could not encode the attendance store.', 0, $exception);
+            throw new RuntimeException('The incident store contains invalid JSON.', 0, $exception);
+        }
+        if (!is_array($incidents)) {
+            throw new RuntimeException('The incident store has an invalid format.');
         }
 
-        rewind($stream);
-        if (!ftruncate($stream, 0) || fwrite($stream, $contents) !== strlen($contents) || !fflush($stream)) {
-            throw new RuntimeException('Could not save the attendance record.');
+        foreach ($incidents as $incident) {
+            if (
+                !is_array($incident)
+                || !isset($incident['id'], $incident['student'], $incident['type'], $incident['location'], $incident['details'], $incident['occurrence_at'], $incident['reported_at'], $incident['reporter'], $incident['status'])
+                || !is_string($incident['id'])
+                || !is_string($incident['student'])
+                || !is_string($incident['type'])
+                || !is_string($incident['location'])
+                || !is_string($incident['details'])
+                || !is_string($incident['occurrence_at'])
+                || !is_string($incident['reported_at'])
+                || !is_string($incident['reporter'])
+                || !in_array($incident['status'], ['Pending', 'Reviewed', 'Resolved'], true)
+            ) {
+                throw new RuntimeException('The incident store contains an invalid record.');
+            }
         }
 
-        return $attendance;
+        return array_values($incidents);
+    } finally {
+        if (!$alreadyLocked) {
+            flock($stream, LOCK_UN);
+        }
+    }
+}
+
+function incident_records(): array
+{
+    $path = incident_store_path();
+    if (!is_file($path)) {
+        return [];
+    }
+
+    $stream = fopen($path, 'rb');
+    if ($stream === false) {
+        throw new RuntimeException('Could not open the incident store.');
+    }
+    try {
+        return read_incidents_store($stream);
+    } finally {
+        fclose($stream);
+    }
+}
+
+function write_incidents_store($stream, array $incidents): void
+{
+    try {
+        $contents = json_encode($incidents, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+    } catch (JsonException $exception) {
+        throw new RuntimeException('Could not encode the incident store.', 0, $exception);
+    }
+
+    rewind($stream);
+    if (!ftruncate($stream, 0) || fwrite($stream, $contents) !== strlen($contents) || !fflush($stream)) {
+        throw new RuntimeException('Could not save the incident store.');
+    }
+}
+
+function create_incident_record(array $incident): array
+{
+    $stream = open_private_store(incident_store_path());
+    if (!flock($stream, LOCK_EX)) {
+        fclose($stream);
+        throw new RuntimeException('Could not lock the incident store for writing.');
+    }
+
+    try {
+        $incidents = read_incidents_store($stream, true);
+        $nextNumber = 1;
+        foreach ($incidents as $existingIncident) {
+            if (preg_match('/\AV(\d+)\z/', $existingIncident['id'], $matches) === 1) {
+                $nextNumber = max($nextNumber, (int) $matches[1] + 1);
+            }
+        }
+
+        $incident['id'] = 'V' . str_pad((string) $nextNumber, 4, '0', STR_PAD_LEFT);
+        $incident['status'] = 'Pending';
+        $incidents[] = $incident;
+        write_incidents_store($stream, $incidents);
+
+        return $incident;
+    } finally {
+        flock($stream, LOCK_UN);
+        fclose($stream);
+    }
+}
+
+function review_incident_record(string $incidentId): bool
+{
+    $stream = open_private_store(incident_store_path());
+    if (!flock($stream, LOCK_EX)) {
+        fclose($stream);
+        throw new RuntimeException('Could not lock the incident store for writing.');
+    }
+
+    try {
+        $incidents = read_incidents_store($stream, true);
+        foreach ($incidents as &$incident) {
+            if ($incident['id'] === $incidentId && $incident['status'] === 'Pending') {
+                $incident['status'] = 'Reviewed';
+                unset($incident);
+                write_incidents_store($stream, $incidents);
+                return true;
+            }
+        }
+        unset($incident);
+
+        return false;
     } finally {
         flock($stream, LOCK_UN);
         fclose($stream);

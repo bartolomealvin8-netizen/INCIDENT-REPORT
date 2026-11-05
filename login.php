@@ -27,7 +27,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    $error = 'The username, school email, student ID, or password is incorrect.';
+    $error = 'The username, school email, or password is incorrect.';
 }
 ?>
 <!DOCTYPE html>
@@ -630,7 +630,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <?php endif; ?>
 
                 <div class="form-field">
-                    <label for="identifier">Username, school email, or student ID</label>
+                    <label for="identifier">Username or school email</label>
                     <input
                         type="text"
                         id="identifier"
@@ -640,7 +640,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         autocapitalize="none"
                         spellcheck="false"
                         maxlength="254"
-                        placeholder="Enter your username, school email, or student ID"
+                        placeholder="Enter your username or school email"
                         required
                     >
                 </div>
